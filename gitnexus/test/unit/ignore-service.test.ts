@@ -1,5 +1,8 @@
-import { describe, it, expect } from 'vitest';
-import { shouldIgnorePath } from '../../src/config/ignore-service.js';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import fs from 'fs/promises';
+import path from 'path';
+import os from 'os';
+import { shouldIgnorePath, isIgnoredDirectory, loadIgnoreRules, createIgnoreFilter } from '../../src/config/ignore-service.js';
 
 describe('shouldIgnorePath', () => {
   describe('version control directories', () => {
@@ -133,5 +136,120 @@ describe('shouldIgnorePath', () => {
     ])('does not ignore source file %s', (filePath) => {
       expect(shouldIgnorePath(filePath)).toBe(false);
     });
+  });
+});
+
+describe('isIgnoredDirectory', () => {
+  it('returns true for known ignored directories', () => {
+    expect(isIgnoredDirectory('node_modules')).toBe(true);
+    expect(isIgnoredDirectory('.git')).toBe(true);
+    expect(isIgnoredDirectory('dist')).toBe(true);
+    expect(isIgnoredDirectory('__pycache__')).toBe(true);
+  });
+
+  it('returns false for source directories', () => {
+    expect(isIgnoredDirectory('src')).toBe(false);
+    expect(isIgnoredDirectory('lib')).toBe(false);
+    expect(isIgnoredDirectory('app')).toBe(false);
+    expect(isIgnoredDirectory('local')).toBe(false);
+  });
+});
+
+describe('loadIgnoreRules', () => {
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gn-ignore-test-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('returns null when no ignore files exist', async () => {
+    const result = await loadIgnoreRules(tmpDir);
+    expect(result).toBeNull();
+  });
+
+  it('parses .gitignore file', async () => {
+    await fs.writeFile(path.join(tmpDir, '.gitignore'), 'data/\nlogs/\n');
+    const ig = await loadIgnoreRules(tmpDir);
+    expect(ig).not.toBeNull();
+    expect(ig!.ignores('data/file.txt')).toBe(true);
+    expect(ig!.ignores('logs/app.log')).toBe(true);
+    expect(ig!.ignores('src/index.ts')).toBe(false);
+    await fs.unlink(path.join(tmpDir, '.gitignore'));
+  });
+
+  it('parses .gitnexusignore file', async () => {
+    await fs.writeFile(path.join(tmpDir, '.gitnexusignore'), 'vendor/\n*.test.ts\n');
+    const ig = await loadIgnoreRules(tmpDir);
+    expect(ig).not.toBeNull();
+    expect(ig!.ignores('vendor/lib.js')).toBe(true);
+    expect(ig!.ignores('src/app.test.ts')).toBe(true);
+    expect(ig!.ignores('src/app.ts')).toBe(false);
+    await fs.unlink(path.join(tmpDir, '.gitnexusignore'));
+  });
+
+  it('combines both files', async () => {
+    await fs.writeFile(path.join(tmpDir, '.gitignore'), 'data/\n');
+    await fs.writeFile(path.join(tmpDir, '.gitnexusignore'), 'vendor/\n');
+    const ig = await loadIgnoreRules(tmpDir);
+    expect(ig).not.toBeNull();
+    expect(ig!.ignores('data/file.txt')).toBe(true);
+    expect(ig!.ignores('vendor/lib.js')).toBe(true);
+    expect(ig!.ignores('src/index.ts')).toBe(false);
+    await fs.unlink(path.join(tmpDir, '.gitignore'));
+    await fs.unlink(path.join(tmpDir, '.gitnexusignore'));
+  });
+
+  it('handles comments and blank lines', async () => {
+    await fs.writeFile(path.join(tmpDir, '.gitignore'), '# comment\n\ndata/\n\n# another comment\n');
+    const ig = await loadIgnoreRules(tmpDir);
+    expect(ig).not.toBeNull();
+    expect(ig!.ignores('data/file.txt')).toBe(true);
+    expect(ig!.ignores('src/index.ts')).toBe(false);
+    await fs.unlink(path.join(tmpDir, '.gitignore'));
+  });
+});
+
+describe('createIgnoreFilter', () => {
+  let tmpDir: string;
+
+  beforeAll(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'gn-filter-test-'));
+  });
+
+  afterAll(async () => {
+    await fs.rm(tmpDir, { recursive: true, force: true });
+  });
+
+  it('creates a filter with ignored and childrenIgnored methods', async () => {
+    const filter = await createIgnoreFilter(tmpDir);
+    expect(typeof filter.ignored).toBe('function');
+    expect(typeof filter.childrenIgnored).toBe('function');
+  });
+
+  it('childrenIgnored returns true for hardcoded directories', async () => {
+    const filter = await createIgnoreFilter(tmpDir);
+    // Simulate a Path-like object
+    const mockPath = { name: 'node_modules', relative: () => 'node_modules' } as any;
+    expect(filter.childrenIgnored(mockPath)).toBe(true);
+
+    const srcPath = { name: 'src', relative: () => 'src' } as any;
+    expect(filter.childrenIgnored(srcPath)).toBe(false);
+  });
+
+  it('childrenIgnored returns true for gitignored directories', async () => {
+    await fs.writeFile(path.join(tmpDir, '.gitignore'), 'local/\n');
+    const filter = await createIgnoreFilter(tmpDir);
+
+    const localPath = { name: 'local', relative: () => 'local' } as any;
+    expect(filter.childrenIgnored(localPath)).toBe(true);
+
+    const srcPath = { name: 'src', relative: () => 'src' } as any;
+    expect(filter.childrenIgnored(srcPath)).toBe(false);
+
+    await fs.unlink(path.join(tmpDir, '.gitignore'));
   });
 });

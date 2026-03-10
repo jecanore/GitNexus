@@ -1,3 +1,8 @@
+import ignore, { type Ignore } from 'ignore';
+import fs from 'fs/promises';
+import nodePath from 'path';
+import type { Path } from 'path-scurry';
+
 const DEFAULT_IGNORE_LIST = new Set([
     // Version Control
     '.git',
@@ -236,4 +241,63 @@ export const shouldIgnorePath = (filePath: string): boolean => {
 
   return false;
 }
+
+/** Check if a directory name is in the hardcoded ignore list */
+export const isIgnoredDirectory = (name: string): boolean => {
+  return DEFAULT_IGNORE_LIST.has(name);
+};
+
+/**
+ * Load .gitignore and .gitnexusignore rules from the repo root.
+ * Returns an `ignore` instance with all patterns, or null if no files found.
+ */
+export const loadIgnoreRules = async (repoPath: string): Promise<Ignore | null> => {
+  const ig = ignore();
+  let hasRules = false;
+
+  for (const filename of ['.gitignore', '.gitnexusignore']) {
+    try {
+      const content = await fs.readFile(nodePath.join(repoPath, filename), 'utf-8');
+      ig.add(content);
+      hasRules = true;
+    } catch {
+      // File doesn't exist or unreadable — skip silently
+    }
+  }
+
+  return hasRules ? ig : null;
+};
+
+/**
+ * Create a glob-compatible ignore filter combining:
+ * - .gitignore / .gitnexusignore patterns (via `ignore` package)
+ * - Hardcoded DEFAULT_IGNORE_LIST, IGNORED_EXTENSIONS, IGNORED_FILES
+ *
+ * Returns an IgnoreLike object for glob's `ignore` option,
+ * enabling directory-level pruning during traversal.
+ */
+export const createIgnoreFilter = async (repoPath: string) => {
+  const ig = await loadIgnoreRules(repoPath);
+
+  return {
+    ignored(p: Path): boolean {
+      const rel = p.relative();
+      if (!rel) return false;
+      // Check .gitignore / .gitnexusignore patterns
+      if (ig && ig.ignores(rel)) return true;
+      // Fall back to hardcoded rules
+      return shouldIgnorePath(rel);
+    },
+    childrenIgnored(p: Path): boolean {
+      // Fast path: check directory name against hardcoded list
+      if (DEFAULT_IGNORE_LIST.has(p.name)) return true;
+      // Check against .gitignore / .gitnexusignore patterns
+      if (ig) {
+        const rel = p.relative();
+        if (rel && ig.ignores(rel + '/')) return true;
+      }
+      return false;
+    },
+  };
+};
 
