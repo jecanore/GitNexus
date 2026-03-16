@@ -1,0 +1,115 @@
+import { describe, it, expect } from 'vitest';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import { walkRepositoryPaths, readFileContents } from '../../src/core/ingestion/filesystem-walker.js';
+import { processParsing } from '../../src/core/ingestion/parsing-processor.js';
+import { createKnowledgeGraph } from '../../src/core/graph/graph.js';
+import { createSymbolTable } from '../../src/core/ingestion/symbol-table.js';
+import { createASTCache } from '../../src/core/ingestion/ast-cache.js';
+import { isLanguageAvailable } from '../../src/core/tree-sitter/parser-loader.js';
+import { SupportedLanguages } from '../../src/config/supported-languages.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const fixturePath = path.resolve(__dirname, '../fixtures/ignore-and-skip-repo');
+
+// ============================================================================
+// E2E: .gitignore + .gitnexusignore + unsupported language skip
+// ============================================================================
+
+describe('ignore + language-skip E2E', () => {
+
+  // ── File Discovery ──────────────────────────────────────────────────
+
+  describe('file discovery (walkRepositoryPaths)', () => {
+    it('includes source files from src/', async () => {
+      const files = await walkRepositoryPaths(fixturePath);
+      const paths = files.map(f => f.path.replace(/\\/g, '/'));
+
+      expect(paths).toContain('src/index.ts');
+      expect(paths).toContain('src/greet.ts');
+    });
+
+    it('includes .swift files (discovery does not filter by language)', async () => {
+      const files = await walkRepositoryPaths(fixturePath);
+      const paths = files.map(f => f.path.replace(/\\/g, '/'));
+
+      // Swift file should be discovered — language skip happens at parse time
+      expect(paths).toContain('src/App.swift');
+    });
+
+    it('excludes gitignored directories (data/)', async () => {
+      const files = await walkRepositoryPaths(fixturePath);
+      const paths = files.map(f => f.path.replace(/\\/g, '/'));
+
+      expect(paths.every(p => !p.includes('data/'))).toBe(true);
+    });
+
+    it('excludes gitignored file patterns (*.log)', async () => {
+      const files = await walkRepositoryPaths(fixturePath);
+      const paths = files.map(f => f.path.replace(/\\/g, '/'));
+
+      expect(paths.every(p => !p.endsWith('.log'))).toBe(true);
+    });
+
+    it('excludes gitnexusignored directories (vendor/)', async () => {
+      const files = await walkRepositoryPaths(fixturePath);
+      const paths = files.map(f => f.path.replace(/\\/g, '/'));
+
+      expect(paths.every(p => !p.includes('vendor/'))).toBe(true);
+    });
+  });
+
+  // ── Parsing ─────────────────────────────────────────────────────────
+
+  describe('parsing (processParsing)', () => {
+    it('parses TypeScript files into graph nodes and skips Swift gracefully', async () => {
+      // Phase 1: discover files
+      const scannedFiles = await walkRepositoryPaths(fixturePath);
+      const relativePaths = scannedFiles.map(f => f.path);
+
+      // Phase 2: read contents
+      const contentMap = await readFileContents(fixturePath, relativePaths);
+      const files = Array.from(contentMap.entries()).map(([p, content]) => ({
+        path: p,
+        content,
+      }));
+
+      // Phase 3: parse (sequential — no worker pool)
+      const graph = createKnowledgeGraph();
+      const symbolTable = createSymbolTable();
+      const astCache = createASTCache();
+
+      // Should NOT throw even if Swift grammar is unavailable
+      await processParsing(graph, files, symbolTable, astCache);
+
+      // TypeScript files should produce Function nodes
+      const nodes = graph.getNodes();
+      const functionNodes = nodes.filter(n => n.label === 'Function');
+      const functionNames = functionNodes.map(n => n.properties.name);
+
+      expect(functionNames).toContain('main');
+      expect(functionNames).toContain('greet');
+
+      // File nodes should exist for the TS files
+      const fileNodes = nodes.filter(n => n.label === 'File');
+      const filePaths = fileNodes.map(n =>
+        (n.properties.path as string).replace(/\\/g, '/'),
+      );
+      expect(filePaths.some(p => p.includes('index.ts'))).toBe(true);
+      expect(filePaths.some(p => p.includes('greet.ts'))).toBe(true);
+
+      // DEFINES relationships should connect files to functions
+      const relationships = graph.getRelationships();
+      const definesRels = relationships.filter(r => r.type === 'DEFINES');
+      expect(definesRels.length).toBeGreaterThanOrEqual(2);
+
+      // Swift behavior depends on grammar availability
+      if (!isLanguageAvailable(SupportedLanguages.Swift)) {
+        // No Swift nodes should appear in the graph
+        const swiftFiles = filePaths.filter(p => p.endsWith('.swift'));
+        expect(swiftFiles).toHaveLength(0);
+      }
+      // If Swift IS available, Swift nodes may appear — that's fine
+    });
+  });
+});

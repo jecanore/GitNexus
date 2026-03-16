@@ -25,7 +25,7 @@ jobs:
   #                the OS reclaim all resources cleanly.
   #   pipeline   — 12 files: ingestion pipeline + csv + 9 resolver tests
   #   e2e        — 2 files: child-process only (spawnSync), no in-process lbug
-  #   standalone — 4 files: pure logic, no lbug, no child processes
+  #   standalone — 5 files: pure logic, no lbug, no child processes
   test-matrix:
     name: integration (${{ matrix.os }} / ${{ matrix.test-group }})
     strategy:
@@ -64,6 +64,7 @@ jobs:
               test/integration/enrichment.test.ts
               test/integration/tree-sitter-languages.test.ts
               test/integration/worker-pool.test.ts
+              test/integration/ignore-and-skip-e2e.test.ts
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
     steps:
@@ -152,6 +153,7 @@ jobs:
           test/integration/enrichment.test.ts
           test/integration/tree-sitter-languages.test.ts
           test/integration/worker-pool.test.ts
+          test/integration/ignore-and-skip-e2e.test.ts
           test/integration/resolvers/typescript.test.ts
           test/integration/resolvers/csharp.test.ts
           test/integration/resolvers/cpp.test.ts
