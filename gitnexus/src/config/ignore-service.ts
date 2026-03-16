@@ -191,6 +191,10 @@ const IGNORED_FILES = new Set([
 
 
 
+// NOTE: Negation patterns in .gitnexusignore (e.g. `!vendor/`) cannot override
+// entries in DEFAULT_IGNORE_LIST — this is intentional. The hardcoded list protects
+// against indexing directories that are almost never source code (node_modules, .git, etc.).
+// Users who need to include such directories should remove them from the hardcoded list.
 export const shouldIgnorePath = (filePath: string): boolean => {
   const normalizedPath = filePath.replace(/\\/g, '/');
   const parts = normalizedPath.split('/');
@@ -243,7 +247,7 @@ export const shouldIgnorePath = (filePath: string): boolean => {
 }
 
 /** Check if a directory name is in the hardcoded ignore list */
-export const isIgnoredDirectory = (name: string): boolean => {
+export const isHardcodedIgnoredDirectory = (name: string): boolean => {
   return DEFAULT_IGNORE_LIST.has(name);
 };
 
@@ -255,13 +259,21 @@ export const loadIgnoreRules = async (repoPath: string): Promise<Ignore | null> 
   const ig = ignore();
   let hasRules = false;
 
-  for (const filename of ['.gitignore', '.gitnexusignore']) {
+  // Allow users to bypass .gitignore parsing (e.g. when .gitignore accidentally excludes source files)
+  const filenames = process.env.GITNEXUS_NO_GITIGNORE
+    ? ['.gitnexusignore']
+    : ['.gitignore', '.gitnexusignore'];
+
+  for (const filename of filenames) {
     try {
       const content = await fs.readFile(nodePath.join(repoPath, filename), 'utf-8');
       ig.add(content);
       hasRules = true;
-    } catch {
-      // File doesn't exist or unreadable — skip silently
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        console.warn(`  Warning: could not read ${filename}: ${(err as Error).message}`);
+      }
     }
   }
 
@@ -289,12 +301,17 @@ export const createIgnoreFilter = async (repoPath: string) => {
       return shouldIgnorePath(rel);
     },
     childrenIgnored(p: Path): boolean {
-      // Fast path: check directory name against hardcoded list
+      // Fast path: check directory name against hardcoded list.
+      // Note: dot-directories (.git, .vscode, etc.) are primarily excluded by
+      // glob's `dot: false` option in filesystem-walker.ts. This check is
+      // defense-in-depth — do not remove `dot: false` assuming this covers it.
       if (DEFAULT_IGNORE_LIST.has(p.name)) return true;
-      // Check against .gitignore / .gitnexusignore patterns
+      // Check against .gitignore / .gitnexusignore patterns.
+      // Test both bare path and path with trailing slash to handle
+      // bare-name patterns (e.g. `local`) and dir-only patterns (e.g. `local/`).
       if (ig) {
         const rel = p.relative();
-        if (rel && ig.ignores(rel + '/')) return true;
+        if (rel && (ig.ignores(rel) || ig.ignores(rel + '/'))) return true;
       }
       return false;
     },
