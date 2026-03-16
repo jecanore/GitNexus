@@ -24,7 +24,8 @@ try { Swift = _require('tree-sitter-swift'); } catch {}
 // tree-sitter-kotlin is an optionalDependency — may not be installed
 let Kotlin: any = null;
 try { Kotlin = _require('tree-sitter-kotlin'); } catch {}
-import { 
+
+import {
   getLanguageFromFilename,
   FUNCTION_NODE_TYPES,
   extractFunctionName,
@@ -178,8 +179,9 @@ const languageMap: Record<string, any> = {
 /**
  * Check if a language grammar is available in this worker.
  * Duplicated from parser-loader.ts because workers can't import from the main thread.
- * Extra filePath parameter needed to distinguish .tsx from .ts (different grammars
- * under the same SupportedLanguages.TypeScript key).
+ * Extra `filePath` parameter is needed here to distinguish .tsx from .ts (different grammars
+ * under the same SupportedLanguages.TypeScript key); the main-thread version handles this
+ * inside loadLanguage() instead.
  */
 const isLanguageAvailable = (language: SupportedLanguages, filePath: string): boolean => {
   const key = language === SupportedLanguages.TypeScript && filePath.endsWith('.tsx')
