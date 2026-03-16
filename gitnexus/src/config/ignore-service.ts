@@ -255,12 +255,21 @@ export const isHardcodedIgnoredDirectory = (name: string): boolean => {
  * Load .gitignore and .gitnexusignore rules from the repo root.
  * Returns an `ignore` instance with all patterns, or null if no files found.
  */
-export const loadIgnoreRules = async (repoPath: string): Promise<Ignore | null> => {
+export interface IgnoreOptions {
+  /** Skip .gitignore parsing, only read .gitnexusignore. Defaults to GITNEXUS_NO_GITIGNORE env var. */
+  noGitignore?: boolean;
+}
+
+export const loadIgnoreRules = async (
+  repoPath: string,
+  options?: IgnoreOptions
+): Promise<Ignore | null> => {
   const ig = ignore();
   let hasRules = false;
 
   // Allow users to bypass .gitignore parsing (e.g. when .gitignore accidentally excludes source files)
-  const filenames = process.env.GITNEXUS_NO_GITIGNORE
+  const skipGitignore = options?.noGitignore ?? !!process.env.GITNEXUS_NO_GITIGNORE;
+  const filenames = skipGitignore
     ? ['.gitnexusignore']
     : ['.gitignore', '.gitnexusignore'];
 
@@ -288,11 +297,13 @@ export const loadIgnoreRules = async (repoPath: string): Promise<Ignore | null> 
  * Returns an IgnoreLike object for glob's `ignore` option,
  * enabling directory-level pruning during traversal.
  */
-export const createIgnoreFilter = async (repoPath: string) => {
-  const ig = await loadIgnoreRules(repoPath);
+export const createIgnoreFilter = async (repoPath: string, options?: IgnoreOptions) => {
+  const ig = await loadIgnoreRules(repoPath, options);
 
   return {
     ignored(p: Path): boolean {
+      // path-scurry's Path.relative() returns POSIX paths on all platforms,
+      // which is what the `ignore` package expects. No explicit normalization needed.
       const rel = p.relative();
       if (!rel) return false;
       // Check .gitignore / .gitnexusignore patterns
