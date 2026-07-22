@@ -36,6 +36,7 @@ import {
   isDbBusyError,
   isOpenRetryExhausted,
   isWalCorruptionError,
+  bufferPoolExhaustionRemedy,
   openLbugConnection,
   sleep,
   toNativeSafePath,
@@ -45,6 +46,7 @@ import {
   type LbugConnectionHandle,
 } from './lbug-config.js';
 import {
+  cleanQuarantinedMissingShadowWals,
   finalizeLbugSidecarsAfterClose,
   guardWalQuarantine,
   isMissingShadowSidecarError,
@@ -54,6 +56,7 @@ import {
   quarantineWalForMissingShadow,
   renameFailureMessage,
   shadowSidecarRecoveryMessage,
+  sidecarPreflightDisabled,
 } from './sidecar-recovery.js';
 
 import { logger } from '../logger.js';
@@ -821,6 +824,30 @@ const doInitLbug = async (dbPath: string, readOnly: boolean = false) => {
     // -------------------------------------------------------------------------
     const releaseInitLock = await acquireInitLock(dbPath);
     try {
+      // Reclaim missing-shadow WAL quarantines from a PRIOR crash (#2637).
+      // LadybugDB renames an unrecoverable WAL aside as
+      // `${dbPath}.wal.missing-shadow.<ts>-<rand>` (quarantineWalForMissingShadow)
+      // instead of deleting it. Once quarantined it is permanently detached from
+      // the live store and never reopened, so reclaiming it is safe regardless of
+      // whether the main DB file exists this run — unlike the orphan-sidecar
+      // cleanup below, this must NOT be gated on "main DB missing": a quarantine
+      // event and a healthy main DB are independent facts. Never let a reclaim
+      // failure (e.g. a transient EBUSY from an antivirus scan) block DB startup.
+      if (!sidecarPreflightDisabled()) {
+        try {
+          const reclaimed = await cleanQuarantinedMissingShadowWals(dbPath);
+          for (const file of reclaimed) {
+            logger.warn(
+              `GitNexus: reclaimed quarantined WAL ${path.basename(file)} from a prior crash`,
+            );
+          }
+        } catch (err) {
+          logger.warn(
+            `GitNexus: failed to reclaim missing-shadow WAL quarantines: ${summarizeError(err)}`,
+          );
+        }
+      }
+
       // Crash-recovery cleanup: if the main DB file is missing, stale sidecars
       // from an interrupted run can block fresh opens indefinitely.
       try {
@@ -952,7 +979,14 @@ const copyNodeCSVs = async (
     const copyQuery = getCopyQuery(table, normalizeCopyPath(csvPath));
     await copyCsvWithRetry(targetConn, copyQuery, (retryErr) => {
       const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-      throw new Error(`COPY failed for ${table}: ${retryMsg.slice(0, 200)}`);
+      // Pool exhaustion gets a remedy (#2631): the raw binder text gives the
+      // operator nothing to act on, and on non-4K-page hosts (Ascend aarch64,
+      // Apple Silicon) the pool bills up to pageSize/4KiB x faster than the
+      // sizing was calibrated for — name the knob and the mechanism.
+      const remedy = bufferPoolExhaustionRemedy(retryMsg);
+      throw new Error(
+        `COPY failed for ${table}: ${retryMsg.slice(0, 200)}${remedy ? ` ${remedy}` : ''}`,
+      );
     });
   }
 };
@@ -1124,6 +1158,7 @@ export const loadGraphToLbug = async (
 
   const insertedRels = totalValidRels;
   const warnings: string[] = [];
+  let poolRemedyIssued = false;
   if (insertedRels > 0) {
     log(`Loading edges: ${insertedRels.toLocaleString()} across ${relsByPair.size} types`);
 
@@ -1150,6 +1185,17 @@ export const loadGraphToLbug = async (
       await copyCsvWithRetry(writeConn, copyQuery, (retryErr) => {
         const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
         warnings.push(`${fromLabel}->${toLabel} (${rows} edges): ${retryMsg.slice(0, 80)}`);
+        // One remedy per bulk load, not per pair (#2631): pool exhaustion
+        // repeats for every remaining pair once it starts. logger.warn, not
+        // just warnings.push — the returned warnings array has no consumer at
+        // any call site, so a push alone would leave the remedy invisible
+        // while the row-by-row fallback quietly degrades the load.
+        const remedy = poolRemedyIssued ? undefined : bufferPoolExhaustionRemedy(retryMsg);
+        if (remedy) {
+          poolRemedyIssued = true;
+          warnings.push(remedy);
+          logger.warn(remedy);
+        }
         failedPairEdges += rows;
         failedPairCsvPaths.add(pairCsvPath);
       });
