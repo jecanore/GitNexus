@@ -1,5 +1,5 @@
 import { execFileSync, execSync } from 'child_process';
-import { statSync } from 'fs';
+import { statSync, existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
 
@@ -43,6 +43,51 @@ export const isWorkingTreeDirty = (repoPath: string): boolean => {
     return out.trim().length > 0;
   } catch {
     return true; // conservative on git failure
+  }
+};
+
+/**
+ * Best-effort auto-commit for the AGENTS.md/CLAUDE.md files `analyze --self-commit`
+ * just (re)wrote. Filters `candidateFiles` down to the ones that actually exist
+ * under `repoPath`, then commits only that scoped set — never `git add -A` — if
+ * `git status --porcelain` reports anything for them. `--porcelain` (not
+ * `diff --quiet`) is deliberate: a first-time `analyze` run creates AGENTS.md/
+ * CLAUDE.md fresh, and untracked files never show up in `git diff`, only in
+ * `git status` — the same reason `isWorkingTreeDirty` above uses `--porcelain`.
+ * No-ops silently (never throws) when: none of the candidate files exist, none
+ * changed, or any git step fails (e.g. no git identity configured). Must never
+ * fail the surrounding `analyze` run. See #2639.
+ */
+export const selfCommitContextFiles = (repoPath: string, candidateFiles: string[]): void => {
+  const existing = candidateFiles.filter((name) => existsSync(path.join(repoPath, name)));
+  if (existing.length === 0) return;
+
+  try {
+    const status = execFileSync('git', ['status', '--porcelain', '--', ...existing], {
+      cwd: repoPath,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+      encoding: 'utf8',
+    });
+    if (status.trim().length === 0) return; // nothing to commit
+  } catch {
+    return; // git failed (not a repo, git missing, etc.) — nothing to do
+  }
+
+  try {
+    execFileSync('git', ['add', '--', ...existing], {
+      cwd: repoPath,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    execFileSync(
+      'git',
+      ['commit', '-m', 'chore(gitnexus): refresh index stats [skip ci]', '--', ...existing],
+      { cwd: repoPath, stdio: 'ignore', windowsHide: true },
+    );
+  } catch {
+    // best-effort — e.g. missing git identity, or a race that left nothing
+    // staged. Never fail `analyze` over this.
   }
 };
 

@@ -33,7 +33,7 @@ import {
   assertAnalysisFinalized,
   type AnalyzerRunnerIdentity,
 } from '../storage/repo-manager.js';
-import { getGitRoot, hasGitDir, getDefaultBranch } from '../storage/git.js';
+import { getGitRoot, hasGitDir, getDefaultBranch, selfCommitContextFiles } from '../storage/git.js';
 import {
   loadAnalyzeConfig,
   mergeAnalyzeOptions,
@@ -648,6 +648,13 @@ export interface AnalyzeOptions {
    * default-on case.
    */
   stats?: boolean;
+  /**
+   * Opt-in auto-commit of any AGENTS.md/CLAUDE.md changes this `analyze` run
+   * makes. Scoped to only those two files (never `git add -A`); no-ops
+   * silently if neither exists, neither changed, or the commit step itself
+   * fails (e.g. no git identity configured). See #2639.
+   */
+  selfCommit?: boolean;
   /** Skip installing standard GitNexus skill files directly under .claude/skills/. */
   skipSkills?: boolean;
   /**
@@ -1438,6 +1445,11 @@ const analyzeCommandImpl = async (
           `  Updated base_ref to "${resolvedDefaultBranch}" in ${baseRefRefreshed.join(', ')}\n`,
         );
       }
+      // #2639: opt-in self-commit of any AGENTS.md/CLAUDE.md churn from this
+      // fast path (e.g. a base_ref refresh above). Best-effort — never throws.
+      if (options.selfCommit === true) {
+        selfCommitContextFiles(repoPath, ['AGENTS.md', 'CLAUDE.md']);
+      }
       // Safe to return without process.exit(0) — the early-return path in
       // runFullAnalysis never opens LadybugDB, so no native handles prevent exit.
       return;
@@ -1525,6 +1537,14 @@ const analyzeCommandImpl = async (
       } catch {
         /* best-effort */
       }
+    }
+
+    // #2639: opt-in self-commit of any AGENTS.md/CLAUDE.md churn written by
+    // this run (the primary generateAIContextFiles call inside
+    // runFullAnalysis, and/or the --skills regeneration above). Best-effort
+    // — never throws, so a missing git identity etc. can't fail `analyze`.
+    if (options.selfCommit === true) {
+      selfCommitContextFiles(repoPath, ['AGENTS.md', 'CLAUDE.md']);
     }
 
     const totalTime = ((Date.now() - t0) / 1000).toFixed(1);

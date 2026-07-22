@@ -341,3 +341,132 @@ describe('getCanonicalRepoRoot', () => {
     }
   });
 });
+
+// ─── selfCommitContextFiles (#2639) ────────────────────────────────────────
+
+describe('selfCommitContextFiles', () => {
+  const initRepo = (): string => {
+    const repoDir = makeIsolatedTempDir('gitnexus-self-commit-');
+    execFileSync(gitExecutable, ['init', '-q'], { cwd: repoDir, stdio: 'ignore' });
+    execSync('git config user.email "test@example.com"', { cwd: repoDir });
+    execSync('git config user.name "Test"', { cwd: repoDir });
+    return repoDir;
+  };
+
+  const lastCommitMessage = (repoDir: string): string =>
+    execSync('git log -1 --format=%s', { cwd: repoDir, encoding: 'utf8' }).trim();
+
+  const commitCount = (repoDir: string): number =>
+    Number(execSync('git rev-list --count HEAD', { cwd: repoDir, encoding: 'utf8' }).trim());
+
+  it('commits only the changed candidate file, scoped by name (never git add -A)', async () => {
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const repoDir = initRepo();
+    try {
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v1\n');
+      execSync('git add AGENTS.md', { cwd: repoDir });
+      execSync('git commit -q -m "initial"', { cwd: repoDir });
+
+      // Dirty AGENTS.md (candidate) plus an unrelated untracked file that
+      // must never be swept in.
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v2\n');
+      fs.writeFileSync(path.join(repoDir, 'unrelated.txt'), 'should stay untouched\n');
+
+      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+
+      expect(commitCount(repoDir)).toBe(2);
+      expect(lastCommitMessage(repoDir)).toBe('chore(gitnexus): refresh index stats [skip ci]');
+      const status = execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8' });
+      // unrelated.txt is still untracked/dirty — proves the commit was scoped.
+      expect(status).toContain('unrelated.txt');
+      expect(status).not.toContain('AGENTS.md');
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('no-ops (no new commit) when neither candidate file changed', async () => {
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const repoDir = initRepo();
+    try {
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v1\n');
+      execSync('git add AGENTS.md', { cwd: repoDir });
+      execSync('git commit -q -m "initial"', { cwd: repoDir });
+
+      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+
+      expect(commitCount(repoDir)).toBe(1);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('commits newly-created (untracked) candidate files, not just modified ones', async () => {
+    // Regression guard: a first-time `analyze --self-commit` run creates
+    // AGENTS.md/CLAUDE.md fresh — they are untracked, not modified. An
+    // implementation based on `git diff --quiet` misses untracked files
+    // entirely and would silently skip this case.
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const repoDir = initRepo();
+    try {
+      execSync('git commit -q --allow-empty -m "initial"', { cwd: repoDir });
+
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'fresh from analyze\n');
+
+      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+
+      expect(commitCount(repoDir)).toBe(2);
+      expect(lastCommitMessage(repoDir)).toBe('chore(gitnexus): refresh index stats [skip ci]');
+      const status = execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8' });
+      expect(status.trim()).toBe('');
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('no-ops when neither candidate file exists on disk', async () => {
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const repoDir = initRepo();
+    try {
+      execSync('git commit -q --allow-empty -m "initial"', { cwd: repoDir });
+
+      expect(() => selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md'])).not.toThrow();
+      expect(commitCount(repoDir)).toBe(1);
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('never throws when repoPath is not a git repository', async () => {
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const tmpDir = makeIsolatedTempDir('gitnexus-self-commit-nongit-');
+    try {
+      fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), 'not a git repo\n');
+      expect(() => selfCommitContextFiles(tmpDir, ['AGENTS.md', 'CLAUDE.md'])).not.toThrow();
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('commits both files when both changed, still scoped (no -A)', async () => {
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const repoDir = initRepo();
+    try {
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v1\n');
+      fs.writeFileSync(path.join(repoDir, 'CLAUDE.md'), 'v1\n');
+      execSync('git add AGENTS.md CLAUDE.md', { cwd: repoDir });
+      execSync('git commit -q -m "initial"', { cwd: repoDir });
+
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v2\n');
+      fs.writeFileSync(path.join(repoDir, 'CLAUDE.md'), 'v2\n');
+
+      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+
+      expect(commitCount(repoDir)).toBe(2);
+      const status = execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8' });
+      expect(status.trim()).toBe('');
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+});
