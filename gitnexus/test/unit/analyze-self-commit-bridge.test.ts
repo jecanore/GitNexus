@@ -6,6 +6,7 @@ const {
   generateSkillFilesMock,
   cliErrorMock,
   selfCommitContextFilesMock,
+  snapshotSelfCommitSafetyMock,
 } = vi.hoisted(() => {
   const runFullAnalysisMock = vi.fn();
   const generateAIContextFilesMock = vi.fn(async () => ({ files: [] as string[] }));
@@ -15,12 +16,20 @@ const {
   }));
   const cliErrorMock = vi.fn();
   const selfCommitContextFilesMock = vi.fn();
+  const snapshotSelfCommitSafetyMock = vi.fn(
+    () =>
+      new Map([
+        ['AGENTS.md', true],
+        ['CLAUDE.md', true],
+      ]),
+  );
   return {
     runFullAnalysisMock,
     generateAIContextFilesMock,
     generateSkillFilesMock,
     cliErrorMock,
     selfCommitContextFilesMock,
+    snapshotSelfCommitSafetyMock,
   };
 });
 
@@ -59,6 +68,7 @@ vi.mock('../../src/storage/git.js', () => ({
   hasGitDir: vi.fn(() => true),
   getDefaultBranch: vi.fn(() => null),
   selfCommitContextFiles: selfCommitContextFilesMock,
+  snapshotSelfCommitSafety: snapshotSelfCommitSafetyMock,
 }));
 
 vi.mock('../../src/core/ingestion/utils/max-file-size.js', () => ({
@@ -84,6 +94,7 @@ describe('analyzeCommand --self-commit bridge (#2639)', () => {
     });
     cliErrorMock.mockReset();
     selfCommitContextFilesMock.mockReset();
+    snapshotSelfCommitSafetyMock.mockClear();
     process.exitCode = undefined;
     process.env.NODE_OPTIONS = `${process.env.NODE_OPTIONS ?? ''} --max-old-space-size=8192`.trim();
   });
@@ -110,7 +121,11 @@ describe('analyzeCommand --self-commit bridge (#2639)', () => {
     await analyzeCommand(undefined, { selfCommit: true });
 
     expect(selfCommitContextFilesMock).toHaveBeenCalledTimes(1);
-    expect(selfCommitContextFilesMock).toHaveBeenCalledWith('/repo', ['AGENTS.md', 'CLAUDE.md']);
+    expect(selfCommitContextFilesMock).toHaveBeenCalledWith(
+      '/repo',
+      ['AGENTS.md', 'CLAUDE.md'],
+      expect.any(Map),
+    );
   });
 
   it('calls selfCommitContextFiles on the primary (non-fast-path) analyze run', async () => {
@@ -135,7 +150,11 @@ describe('analyzeCommand --self-commit bridge (#2639)', () => {
       await analyzeCommand(undefined, { selfCommit: true });
 
       expect(selfCommitContextFilesMock).toHaveBeenCalledTimes(1);
-      expect(selfCommitContextFilesMock).toHaveBeenCalledWith('/repo', ['AGENTS.md', 'CLAUDE.md']);
+      expect(selfCommitContextFilesMock).toHaveBeenCalledWith(
+        '/repo',
+        ['AGENTS.md', 'CLAUDE.md'],
+        expect.any(Map),
+      );
     } finally {
       exitSpy.mockRestore();
     }
@@ -175,6 +194,10 @@ describe('analyzeCommand --self-commit bridge (#2639)', () => {
 
     const opts = runFullAnalysisMock.mock.calls[0][1];
     expect(opts.noStats).toBe(true);
-    expect(selfCommitContextFilesMock).toHaveBeenCalledWith('/repo', ['AGENTS.md', 'CLAUDE.md']);
+    expect(selfCommitContextFilesMock).toHaveBeenCalledWith(
+      '/repo',
+      ['AGENTS.md', 'CLAUDE.md'],
+      expect.any(Map),
+    );
   });
 });

@@ -359,6 +359,18 @@ describe('selfCommitContextFiles', () => {
   const commitCount = (repoDir: string): number =>
     Number(execSync('git rev-list --count HEAD', { cwd: repoDir, encoding: 'utf8' }).trim());
 
+  const stagedFiles = (repoDir: string): string[] =>
+    execSync('git diff --cached --name-only', { cwd: repoDir, encoding: 'utf8' })
+      .split('\n')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  // Most tests below aren't exercising snapshotSelfCommitSafety itself (that
+  // has its own describe block); they just need "everything is safe to
+  // commit," matching a normal run where nothing was dirty beforehand.
+  const allSafe = (names: string[]): Map<string, boolean> =>
+    new Map(names.map((name) => [name, true]));
+
   it('commits only the changed candidate file, scoped by name (never git add -A)', async () => {
     const { selfCommitContextFiles } = await import('../../src/storage/git.js');
     const repoDir = initRepo();
@@ -372,7 +384,11 @@ describe('selfCommitContextFiles', () => {
       fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v2\n');
       fs.writeFileSync(path.join(repoDir, 'unrelated.txt'), 'should stay untouched\n');
 
-      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+      selfCommitContextFiles(
+        repoDir,
+        ['AGENTS.md', 'CLAUDE.md'],
+        allSafe(['AGENTS.md', 'CLAUDE.md']),
+      );
 
       expect(commitCount(repoDir)).toBe(2);
       expect(lastCommitMessage(repoDir)).toBe('chore(gitnexus): refresh index stats [skip ci]');
@@ -393,7 +409,11 @@ describe('selfCommitContextFiles', () => {
       execSync('git add AGENTS.md', { cwd: repoDir });
       execSync('git commit -q -m "initial"', { cwd: repoDir });
 
-      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+      selfCommitContextFiles(
+        repoDir,
+        ['AGENTS.md', 'CLAUDE.md'],
+        allSafe(['AGENTS.md', 'CLAUDE.md']),
+      );
 
       expect(commitCount(repoDir)).toBe(1);
     } finally {
@@ -413,7 +433,11 @@ describe('selfCommitContextFiles', () => {
 
       fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'fresh from analyze\n');
 
-      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+      selfCommitContextFiles(
+        repoDir,
+        ['AGENTS.md', 'CLAUDE.md'],
+        allSafe(['AGENTS.md', 'CLAUDE.md']),
+      );
 
       expect(commitCount(repoDir)).toBe(2);
       expect(lastCommitMessage(repoDir)).toBe('chore(gitnexus): refresh index stats [skip ci]');
@@ -430,7 +454,13 @@ describe('selfCommitContextFiles', () => {
     try {
       execSync('git commit -q --allow-empty -m "initial"', { cwd: repoDir });
 
-      expect(() => selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md'])).not.toThrow();
+      expect(() =>
+        selfCommitContextFiles(
+          repoDir,
+          ['AGENTS.md', 'CLAUDE.md'],
+          allSafe(['AGENTS.md', 'CLAUDE.md']),
+        ),
+      ).not.toThrow();
       expect(commitCount(repoDir)).toBe(1);
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
@@ -442,7 +472,13 @@ describe('selfCommitContextFiles', () => {
     const tmpDir = makeIsolatedTempDir('gitnexus-self-commit-nongit-');
     try {
       fs.writeFileSync(path.join(tmpDir, 'AGENTS.md'), 'not a git repo\n');
-      expect(() => selfCommitContextFiles(tmpDir, ['AGENTS.md', 'CLAUDE.md'])).not.toThrow();
+      expect(() =>
+        selfCommitContextFiles(
+          tmpDir,
+          ['AGENTS.md', 'CLAUDE.md'],
+          allSafe(['AGENTS.md', 'CLAUDE.md']),
+        ),
+      ).not.toThrow();
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -460,7 +496,11 @@ describe('selfCommitContextFiles', () => {
       fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v2\n');
       fs.writeFileSync(path.join(repoDir, 'CLAUDE.md'), 'v2\n');
 
-      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+      selfCommitContextFiles(
+        repoDir,
+        ['AGENTS.md', 'CLAUDE.md'],
+        allSafe(['AGENTS.md', 'CLAUDE.md']),
+      );
 
       expect(commitCount(repoDir)).toBe(2);
       const status = execSync('git status --porcelain', { cwd: repoDir, encoding: 'utf8' });
@@ -499,7 +539,13 @@ describe('selfCommitContextFiles', () => {
 
       const cap = _captureLogger();
       try {
-        expect(() => selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md'])).not.toThrow();
+        expect(() =>
+          selfCommitContextFiles(
+            repoDir,
+            ['AGENTS.md', 'CLAUDE.md'],
+            allSafe(['AGENTS.md', 'CLAUDE.md']),
+          ),
+        ).not.toThrow();
       } finally {
         if (savedHome === undefined) delete process.env.HOME;
         else process.env.HOME = savedHome;
@@ -515,6 +561,111 @@ describe('selfCommitContextFiles', () => {
 
       expect(warning).toBeDefined();
       expect(commitCount(repoDir)).toBe(1); // commit never landed
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('skips (and logs) a candidate that already had an uncommitted edit before this run, never sweeping it into the generated commit', async () => {
+    // Regression for #2640 review round 1/2: without snapshotSelfCommitSafety,
+    // a pre-existing unstaged user edit in AGENTS.md and this run's stats
+    // refresh are indistinguishable — both just show up as "AGENTS.md is
+    // dirty" — so the old implementation silently committed both together.
+    const { selfCommitContextFiles, snapshotSelfCommitSafety } =
+      await import('../../src/storage/git.js');
+    const { _captureLogger } = await import('../../src/core/logger.js');
+    const repoDir = initRepo();
+    try {
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v1\n');
+      fs.writeFileSync(path.join(repoDir, 'CLAUDE.md'), 'v1\n');
+      execSync('git add AGENTS.md CLAUDE.md', { cwd: repoDir });
+      execSync('git commit -q -m "initial"', { cwd: repoDir });
+
+      // A user edit lands in AGENTS.md BEFORE analyze/self-commit ever runs.
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'user note\n');
+
+      // The real call sequence: snapshot safety first (this is what
+      // analyze.ts does before writing), THEN simulate analyze's own write
+      // on top of the user's pre-existing edit, for both candidates.
+      const safety = snapshotSelfCommitSafety(repoDir, ['AGENTS.md', 'CLAUDE.md']);
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'user note\ngenerated stats refresh\n');
+      fs.writeFileSync(path.join(repoDir, 'CLAUDE.md'), 'generated stats refresh\n');
+
+      const cap = _captureLogger();
+      selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md'], safety);
+      const warning = cap
+        .records()
+        .find((r) => r.msg.includes('skipping file(s) with uncommitted changes'));
+      cap.restore();
+
+      expect(warning).toBeDefined();
+      // CLAUDE.md was clean pre-run (safe) and got committed; AGENTS.md was
+      // already dirty pre-run (unsafe) and must stay out of the commit and
+      // out of the index entirely — proving its edit wasn't swept in.
+      expect(commitCount(repoDir)).toBe(2);
+      expect(lastCommitMessage(repoDir)).toBe('chore(gitnexus): refresh index stats [skip ci]');
+      const diffTreeFiles = execSync('git diff-tree --no-commit-id --name-only -r HEAD', {
+        cwd: repoDir,
+        encoding: 'utf8',
+      })
+        .split('\n')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      expect(diffTreeFiles).toEqual(['CLAUDE.md']);
+      const status = execSync('git status --porcelain -- AGENTS.md', {
+        cwd: repoDir,
+        encoding: 'utf8',
+      });
+      expect(status.trim()).not.toBe(''); // AGENTS.md's edit is still there, untouched
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
+
+  it('restores the index for exactly the staged files when commit fails after git add (no leftover staged state)', async () => {
+    // Regression for #2640 review round 2: `git add` runs before `git commit`;
+    // if commit then fails (e.g. missing identity), the old implementation
+    // left the candidate staged even though it reported nothing happened —
+    // silently mutating the user's index on a run that "did nothing."
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const repoDir = initRepo();
+    try {
+      execSync('git commit -q --allow-empty -m "initial"', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'fresh from analyze\n');
+
+      execSync('git config user.useConfigOnly true', { cwd: repoDir });
+      execSync('git config --unset user.name', { cwd: repoDir });
+      execSync('git config --unset user.email', { cwd: repoDir });
+
+      const savedHome = process.env.HOME;
+      const savedXdg = process.env.XDG_CONFIG_HOME;
+      const savedNoSystem = process.env.GIT_CONFIG_NOSYSTEM;
+      process.env.HOME = makeIsolatedTempDir('gitnexus-self-commit-noidentity-home2-');
+      process.env.XDG_CONFIG_HOME = process.env.HOME;
+      process.env.GIT_CONFIG_NOSYSTEM = '1';
+      try {
+        selfCommitContextFiles(
+          repoDir,
+          ['AGENTS.md', 'CLAUDE.md'],
+          allSafe(['AGENTS.md', 'CLAUDE.md']),
+        );
+      } finally {
+        if (savedHome === undefined) delete process.env.HOME;
+        else process.env.HOME = savedHome;
+        if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = savedXdg;
+        if (savedNoSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+        else process.env.GIT_CONFIG_NOSYSTEM = savedNoSystem;
+      }
+
+      expect(commitCount(repoDir)).toBe(1); // commit never landed
+      expect(stagedFiles(repoDir)).toEqual([]); // and nothing was left staged
+      // The file itself is still there, unstaged, exactly as analyze left it.
+      const status = execSync('git status --porcelain -- AGENTS.md', {
+        cwd: repoDir,
+        encoding: 'utf8',
+      });
+      expect(status.trim()).toBe('?? AGENTS.md');
     } finally {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
