@@ -2,6 +2,7 @@ import { execFileSync, execSync } from 'child_process';
 import { statSync, existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
+import { logger } from '../core/logger.js';
 
 // Git utilities for repository detection, commit tracking, and diff analysis
 
@@ -85,9 +86,11 @@ export const selfCommitContextFiles = (repoPath: string, candidateFiles: string[
       ['commit', '-m', 'chore(gitnexus): refresh index stats [skip ci]', '--', ...existing],
       { cwd: repoPath, stdio: 'ignore', windowsHide: true },
     );
-  } catch {
+  } catch (err) {
     // best-effort — e.g. missing git identity, or a race that left nothing
-    // staged. Never fail `analyze` over this.
+    // staged. Never fail `analyze` over this, but let the user know why
+    // their AGENTS.md/CLAUDE.md changes weren't committed.
+    logger.warn({ err, files: existing }, 'gitnexus: --self-commit failed to commit context files');
   }
 };
 

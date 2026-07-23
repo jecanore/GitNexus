@@ -469,4 +469,54 @@ describe('selfCommitContextFiles', () => {
       fs.rmSync(repoDir, { recursive: true, force: true });
     }
   });
+
+  it('logs a warning (never throws) when the commit step fails, e.g. no git identity', async () => {
+    const { selfCommitContextFiles } = await import('../../src/storage/git.js');
+    const { _captureLogger } = await import('../../src/core/logger.js');
+    const repoDir = initRepo();
+    try {
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v1\n');
+      execSync('git add AGENTS.md', { cwd: repoDir });
+      execSync('git commit -q -m "initial"', { cwd: repoDir });
+      fs.writeFileSync(path.join(repoDir, 'AGENTS.md'), 'v2\n');
+
+      // useConfigOnly forces git to error on a missing identity instead of
+      // guessing from OS user/hostname; HOME/XDG_CONFIG_HOME are redirected
+      // and GIT_CONFIG_NOSYSTEM disables the system config, so no ambient
+      // global identity on the CI runner can leak in and make git succeed
+      // anyway. Together these deterministically reproduce "no git identity
+      // configured" regardless of the machine running the test.
+      execSync('git config user.useConfigOnly true', { cwd: repoDir });
+      execSync('git config --unset user.name', { cwd: repoDir });
+      execSync('git config --unset user.email', { cwd: repoDir });
+
+      const savedHome = process.env.HOME;
+      const savedXdg = process.env.XDG_CONFIG_HOME;
+      const savedNoSystem = process.env.GIT_CONFIG_NOSYSTEM;
+      process.env.HOME = makeIsolatedTempDir('gitnexus-self-commit-noidentity-home-');
+      process.env.XDG_CONFIG_HOME = process.env.HOME;
+      process.env.GIT_CONFIG_NOSYSTEM = '1';
+
+      const cap = _captureLogger();
+      try {
+        expect(() => selfCommitContextFiles(repoDir, ['AGENTS.md', 'CLAUDE.md'])).not.toThrow();
+      } finally {
+        if (savedHome === undefined) delete process.env.HOME;
+        else process.env.HOME = savedHome;
+        if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = savedXdg;
+        if (savedNoSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+        else process.env.GIT_CONFIG_NOSYSTEM = savedNoSystem;
+      }
+      const warning = cap
+        .records()
+        .find((r) => r.msg.includes('--self-commit failed to commit context files'));
+      cap.restore();
+
+      expect(warning).toBeDefined();
+      expect(commitCount(repoDir)).toBe(1); // commit never landed
+    } finally {
+      fs.rmSync(repoDir, { recursive: true, force: true });
+    }
+  });
 });
