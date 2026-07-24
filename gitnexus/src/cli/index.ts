@@ -100,7 +100,7 @@ program
   )
   .option(
     '--skip-skills',
-    'Skip installing standard GitNexus skill files directly under .claude/skills/. ' +
+    'Skip installing standard GitNexus skill files directly under .claude/skills/ and .agents/skills/. ' +
       'Does not suppress community skills from --skills (those use .claude/skills/gitnexus-area-*). ' +
       'Use --index-only to skip all AI-context file injection.',
   )
